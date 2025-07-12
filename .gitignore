@@ -10,4 +10,4 @@ wheels/
 .venv
 
 # Data files
-test_data.tsv
+test_data*

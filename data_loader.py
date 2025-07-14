@@ -1,106 +1,150 @@
 import os
+import shutil
 import tarfile
 from pathlib import Path
+from typing import Generator, List
 
 import polars as pl
+import typer
 
 
-def preprocess_data(lazy_df: pl.LazyFrame) -> pl.LazyFrame:
+class DataLoader:
     """
-    データフレームに前処理を適用する。
-    - score_level: SCOREに基づいてカテゴリ分類
-    - event_month: EVENT_DATEを月で切り捨て
+    データファイルを処理し、前処理を適用してParquet形式で保存するクラス。
     """
-    t1, t2 = 500, 1500
-    return lazy_df.with_columns(
-        pl.when(pl.col("SCORE") < t1)
-        .then(pl.lit("low"))
-        .when(pl.col("SCORE") < t2)
-        .then(pl.lit("mid"))
-        .otherwise(pl.lit("high"))
-        .alias("score_level"),
-        pl.col("EVENT_DATE").dt.truncate("1mo").alias("event_month"),
-    )
 
+    def __init__(
+        self,
+        input_dir: Path,
+        output_dir: Path,
+        score_thresholds: List[int],
+        temp_dir: Path = Path("temp_extracted_data"),
+    ):
+        self.input_dir = input_dir
+        self.output_dir = output_dir
+        self.score_thresholds = sorted(score_thresholds)
+        self.temp_dir = temp_dir
 
-def process_file(file_path: Path, prepared_dir: Path):
-    """
-    単一のファイル（.tsvまたは.txt）を処理し、Parquet形式で保存する。
-    """
-    output_filename = prepared_dir / f"{file_path.stem}.parquet"
-    if output_filename.exists():
-        print(f"スキップ: {output_filename} は既に存在します。")
-        return
+        self.output_dir.mkdir(exist_ok=True)
+        self.temp_dir.mkdir(exist_ok=True)
 
-    print(f"処理中: {file_path}")
-    try:
-        # .tsvと.txtの両方に対応するため、separatorを推測させる
-        lazy_df = pl.scan_csv(
-            file_path, separator="\t", try_parse_dates=True, has_header=True
+    def find_files(self) -> Generator[Path, None, None]:
+        """
+        入力ディレクトリから対象ファイル（.tsv, .txt, .tar.gz）を再帰的に探索する。
+        """
+        if not self.input_dir.exists():
+            raise FileNotFoundError(
+                f"入力ディレクトリが見つかりません: {self.input_dir}"
+            )
+
+        for root, _, files in os.walk(self.input_dir):
+            for file in files:
+                if file.endswith((".tsv", ".txt", ".tar.gz")):
+                    yield Path(root) / file
+
+    def preprocess(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        """
+        SCOREに基づいてカテゴリ分類し、日付情報を追加する前処理を適用する。
+        """
+        t1, t2 = self.score_thresholds
+        return lf.with_columns(
+            pl.when(pl.col("SCORE") < t1)
+            .then(pl.lit("low"))
+            .when(pl.col("SCORE") < t2)
+            .then(pl.lit("mid"))
+            .otherwise(pl.lit("high"))
+            .alias("score_level"),
+            pl.col("EVENT_DATE").dt.truncate("1mo").alias("event_month"),
         )
 
-        # 前処理の適用
-        processed_lf = preprocess_data(lazy_df)
+    def process_file(self, file_path: Path):
+        """
+        単一のデータファイルを処理し、Parquetとして保存する。
+        """
+        output_path = self.output_dir / f"{file_path.stem}.parquet"
+        if output_path.exists():
+            typer.echo(f"スキップ: {output_path} は既に存在します。")
+            return
 
-        # 結果をParquetファイルとして保存
-        processed_lf.sink_parquet(output_filename)
-        print(f"保存完了: {output_filename}")
+        typer.echo(f"処理中: {file_path}")
+        try:
+            lf = pl.scan_csv(
+                file_path, separator="\t", try_parse_dates=True, has_header=True
+            )
+            processed_lf = self.preprocess(lf)
+            processed_lf.sink_parquet(output_path)
+            typer.echo(f"保存完了: {output_path}")
+        except Exception as e:
+            typer.secho(
+                f"エラー: {file_path} の処理中にエラーが発生しました: {e}",
+                fg=typer.colors.RED,
+            )
 
-    except Exception as e:
-        print(f"エラー: {file_path} の処理中にエラーが発生しました: {e}")
+    def process_tar_gz(self, file_path: Path):
+        """
+        tar.gzファイルを展開し、内部のファイルを処理する。
+        """
+        typer.echo(f"展開中: {file_path}")
+        with tarfile.open(file_path, "r:gz") as tar:
+            tar.extractall(path=self.temp_dir)
+            for member in tar.getmembers():
+                if member.isfile() and (member.name.endswith((".tsv", ".txt"))):
+                    extracted_path = self.temp_dir / member.name
+                    self.process_file(extracted_path)
+
+    def run(self):
+        """
+        データ処理パイプラインを実行する。
+        """
+        typer.echo("データ処理を開始します...")
+        try:
+            for file_path in self.find_files():
+                if file_path.suffix in [".tsv", ".txt"]:
+                    self.process_file(file_path)
+                elif file_path.suffix == ".gz" and file_path.name.endswith(".tar.gz"):
+                    self.process_tar_gz(file_path)
+        finally:
+            # 一時ディレクトリのクリーンアップ
+            shutil.rmtree(self.temp_dir)
+            typer.echo("一時ファイルをクリーンアップしました。")
+
+        typer.secho("データ処理が完了しました。", fg=typer.colors.GREEN)
 
 
-def process_tar_gz(file_path: Path, prepared_dir: Path, temp_dir: Path):
+app = typer.Typer(help="データローダー・前処理パイプライン")
+
+
+@app.command()
+def main(
+    input_dir: Path = typer.Option(
+        "input_data",
+        "--input",
+        "-i",
+        help="入力データディレクトリのパス",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+    output_dir: Path = typer.Option(
+        "prepared_data",
+        "--output",
+        "-o",
+        help="前処理済みデータを保存するディレクトリのパス",
+    ),
+    score_t1: int = typer.Option(500, help="SCOREの閾値1（low <-> mid）"),
+    score_t2: int = typer.Option(1500, help="SCOREの閾値2（mid <-> high）"),
+):
     """
-    tar.gzファイルを展開し、中のファイルを処理する。
+    データローダーを実行し、ファイルを前処理してParquet形式で保存します。
     """
-    print(f"展開中: {file_path}")
-    with tarfile.open(file_path, "r:gz") as tar:
-        # 安全な展開先の確認
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-        tar.extractall(path=temp_dir)
-
-        for member in tar.getmembers():
-            if member.isfile() and (
-                member.name.endswith(".tsv") or member.name.endswith(".txt")
-            ):
-                extracted_file_path = temp_dir / member.name
-                process_file(extracted_file_path, prepared_dir)
-
-
-def main():
-    """
-    input_dataディレクトリを探索し、ファイルを処理する。
-    """
-    input_dir = Path("input_data")
-    prepared_dir = Path("prepared_data")
-    temp_dir = Path("temp_extracted_data")
-
-    # 出力ディレクトリと一時ディレクトリの作成
-    prepared_dir.mkdir(exist_ok=True)
-    temp_dir.mkdir(exist_ok=True)
-
-    if not input_dir.exists():
-        print(f"エラー: {input_dir} ディレクトリが見つかりません。")
-        return
-
-    print("データ処理を開始します...")
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            file_path = Path(root) / file
-            if file.endswith((".tsv", ".txt")):
-                process_file(file_path, prepared_dir)
-            elif file.endswith(".tar.gz"):
-                process_tar_gz(file_path, prepared_dir, temp_dir)
-
-    # 一時ディレクトリのクリーンアップ
-    import shutil
-
-    shutil.rmtree(temp_dir)
-    print("一時ファイルをクリーンアップしました。")
-    print("データ処理が完了しました。")
+    loader = DataLoader(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        score_thresholds=[score_t1, score_t2],
+    )
+    loader.run()
 
 
 if __name__ == "__main__":
-    main()
+    app()

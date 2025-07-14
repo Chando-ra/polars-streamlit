@@ -4,6 +4,9 @@ import plotly.express as px
 import polars as pl
 import streamlit as st
 
+# --- 時間集計単位の定数 ---
+TIME_AGG_OPTIONS = {"月次": "1mo", "週次": "1w", "日次": "1d"}
+
 
 # --- データ読み込みとキャッシュ ---
 @st.cache_data
@@ -95,6 +98,12 @@ if len(lf.columns) > 0:
         "グラフに表示する上位カテゴリ数", min_value=1, max_value=50, value=10, step=1
     )
 
+    # 4. 時間軸の選択
+    time_agg_label = st.sidebar.radio(
+        "時間集計単位", options=list(TIME_AGG_OPTIONS.keys()), horizontal=True
+    )
+    time_agg_unit = TIME_AGG_OPTIONS[time_agg_label]
+
     # --- フィルタ設定 ---
     st.sidebar.header("フィルタ設定")
     # .collect() を使って実際の値を取得
@@ -153,30 +162,51 @@ if len(lf.columns) > 0:
                 st.subheader("EVENT_VALUE合計 トップ100")
                 st.dataframe(top_by_value)
 
-            st.header("月次トレンド分析")
+            st.header(f"{time_agg_label}トレンド分析")
+
+            # --- 集計用ヘルパー関数 ---
+            def aggregate_for_chart(
+                lf: pl.LazyFrame,
+                agg_col: str,
+                top_cats: list,
+                time_agg_unit: str,
+                value_col: str = None,
+                value_alias: str = None,
+            ) -> pl.DataFrame:
+                df = lf.with_columns(
+                    pl.when(pl.col(agg_col).is_in(top_cats))
+                    .then(pl.col(agg_col))
+                    .otherwise(pl.lit("Other"))
+                    .alias("category_group"),
+                    pl.col("EVENT_TIME").dt.truncate(time_agg_unit).alias("time_agg"),
+                )
+                if value_col and value_alias:
+                    agg_expr = pl.sum(value_col).alias(value_alias)
+                else:
+                    agg_expr = pl.len().alias("record_count")
+                return (
+                    df.group_by(["time_agg", "category_group"])
+                    .agg(agg_expr)
+                    .sort("time_agg")
+                    .collect()
+                )
 
             # --- グラフ1: レコード数 ---
             top_n_by_count_cats = top_by_count.head(top_n)[agg_col].to_list()
-            df_for_count_chart = filtered_lf.with_columns(
-                pl.when(pl.col(agg_col).is_in(top_n_by_count_cats))
-                .then(pl.col(agg_col))
-                .otherwise(pl.lit("Other"))
-                .alias("category_group")
-            )
-            summary_by_count = (
-                df_for_count_chart.group_by(["event_month", "category_group"])
-                .agg(pl.len().alias("record_count"))
-                .sort("event_month")
-                .collect()
+            summary_by_count = aggregate_for_chart(
+                filtered_lf,
+                agg_col,
+                top_n_by_count_cats,
+                time_agg_unit,
             )
             fig1 = px.bar(
                 summary_by_count,
-                x="event_month",
+                x="time_agg",
                 y="record_count",
                 color="category_group",
-                title=f"月別レコード数（{agg_col} 上位{top_n}カテゴリ別内訳）",
+                title=f"{time_agg_label}レコード数（{agg_col} 上位{top_n}カテゴリ別内訳）",
                 labels={
-                    "event_month": "月",
+                    "time_agg": time_agg_label,
                     "record_count": "レコード数",
                     "category_group": "カテゴリ",
                 },
@@ -189,26 +219,22 @@ if len(lf.columns) > 0:
 
             # --- グラフ2: イベント価値合計 ---
             top_n_by_value_cats = top_by_value.head(top_n)[agg_col].to_list()
-            df_for_value_chart = filtered_lf.with_columns(
-                pl.when(pl.col(agg_col).is_in(top_n_by_value_cats))
-                .then(pl.col(agg_col))
-                .otherwise(pl.lit("Other"))
-                .alias("category_group")
-            )
-            summary_by_value = (
-                df_for_value_chart.group_by(["event_month", "category_group"])
-                .agg(pl.sum("EVENT_VALUE").alias("event_value_sum"))
-                .sort("event_month")
-                .collect()
+            summary_by_value = aggregate_for_chart(
+                filtered_lf,
+                agg_col,
+                top_n_by_value_cats,
+                time_agg_unit,
+                value_col="EVENT_VALUE",
+                value_alias="event_value_sum",
             )
             fig2 = px.bar(
                 summary_by_value,
-                x="event_month",
+                x="time_agg",
                 y="event_value_sum",
                 color="category_group",
-                title=f"月別イベント価値合計（{agg_col} 上位{top_n}カテゴリ別内訳）",
+                title=f"{time_agg_label}イベント価値合計（{agg_col} 上位{top_n}カテゴリ別内訳）",
                 labels={
-                    "event_month": "月",
+                    "time_agg": time_agg_label,
                     "event_value_sum": "価値合計",
                     "category_group": "カテゴリ",
                 },

@@ -10,13 +10,16 @@ def generate_random_string(length=10):
     return "".join(random.choice(letters) for i in range(length))
 
 
-def generate_random_date(start_date, end_date):
-    """Generate a random date between two dates."""
+def generate_random_timestamp(start_date, end_date):
+    """Generate a random timestamp between two dates."""
     time_between_dates = end_date - start_date
-    days_between_dates = time_between_dates.days
-    random_number_of_days = random.randrange(days_between_dates)
-    random_date = start_date + datetime.timedelta(days=random_number_of_days)
-    return random_date.strftime("%Y-%m-%d")
+    seconds_in_day = 24 * 60 * 60
+    total_seconds = (
+        time_between_dates.days * seconds_in_day + time_between_dates.seconds
+    )
+    random_second = random.randrange(total_seconds)
+    random_date = start_date + datetime.timedelta(seconds=random_second)
+    return random_date.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
@@ -26,14 +29,14 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
     categories = [generate_random_string() for _ in range(num_categories)]
 
     # 日付生成用の期間設定
-    end_date = datetime.date.today()
+    end_date = datetime.datetime.now()
     start_date = end_date - datetime.timedelta(days=365)
 
     with open(file_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, delimiter="\t")
 
         # ヘッダーを作成
-        header = ["SCORE", "string_col_0", "EVENT_VALUE", "is_fraud", "EVENT_DATE"]
+        header = ["SCORE", "string_col_0", "EVENT_VALUE", "is_fraud", "EVENT_TIME"]
         # 残りの列を追加
         for i in range(5, num_cols):
             if i % 2 != 0:
@@ -55,8 +58,8 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
                 elif i == 3:  # is_fraud
                     # 約1%の確率でTrueを生成
                     row.append(random.random() < 0.01)
-                elif i == 4:  # EVENT_DATE
-                    row.append(generate_random_date(start_date, end_date))
+                elif i == 4:  # EVENT_TIME
+                    row.append(generate_random_timestamp(start_date, end_date))
                 # --- 残りの列 ---
                 elif i % 2 != 0:  # string
                     row.append(generate_random_string())

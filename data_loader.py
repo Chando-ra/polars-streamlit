@@ -54,14 +54,18 @@ class DataLoader:
             .then(pl.lit("mid"))
             .otherwise(pl.lit("high"))
             .alias("score_level"),
-            pl.col("EVENT_DATE").dt.truncate("1mo").alias("event_month"),
+            pl.col("EVENT_TIME").dt.truncate("1mo").alias("event_month"),
         )
 
-    def process_file(self, file_path: Path):
+    def process_file(self, file_path: Path, output_dir: Path | None = None):
         """
         単一のデータファイルを処理し、Parquetとして保存する。
         """
-        output_path = self.output_dir / f"{file_path.stem}.parquet"
+        if output_dir is None:
+            output_dir = self.output_dir
+        output_dir.mkdir(exist_ok=True)
+
+        output_path = output_dir / f"{file_path.stem}.parquet"
         if output_path.exists():
             typer.echo(f"スキップ: {output_path} は既に存在します。")
             return
@@ -69,7 +73,11 @@ class DataLoader:
         typer.echo(f"処理中: {file_path}")
         try:
             lf = pl.scan_csv(
-                file_path, separator="\t", try_parse_dates=True, has_header=True
+                file_path,
+                separator="\t",
+                try_parse_dates=True,
+                has_header=True,
+                ignore_errors=True,
             )
             processed_lf = self.preprocess(lf)
             processed_lf.sink_parquet(output_path)
@@ -83,14 +91,18 @@ class DataLoader:
     def process_tar_gz(self, file_path: Path):
         """
         tar.gzファイルを展開し、内部のファイルを処理する。
+        展開先のディレクトリはtar.gzファイル名から生成する。
         """
         typer.echo(f"展開中: {file_path}")
+        # hoge.tar.gz -> hoge
+        tar_output_dir = self.output_dir / file_path.name.removesuffix(".tar.gz")
+
         with tarfile.open(file_path, "r:gz") as tar:
             tar.extractall(path=self.temp_dir)
             for member in tar.getmembers():
                 if member.isfile() and (member.name.endswith((".tsv", ".txt"))):
                     extracted_path = self.temp_dir / member.name
-                    self.process_file(extracted_path)
+                    self.process_file(extracted_path, output_dir=tar_output_dir)
 
     def run(self):
         """

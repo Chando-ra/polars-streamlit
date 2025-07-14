@@ -45,19 +45,24 @@ st.title("インタラクティブ・データ分析ダッシュボード")
 st.sidebar.header("表示設定")
 
 # 1. データソース選択
-DATA_DIR = Path("prepared_data")
-if DATA_DIR.exists():
-    available_files = sorted(list(DATA_DIR.glob("*.parquet")))
-    available_filenames = [f.name for f in available_files]
+input_dir = st.sidebar.text_input("データディレクトリ", "prepared_data")
+data_dir = Path(input_dir)
+
+if data_dir.exists() and data_dir.is_dir():
+    # .parquetファイルを再帰的に検索
+    available_files = sorted(list(data_dir.glob("**/*.parquet")))
+    # data_dirからの相対パスを生成
+    available_filenames = [str(f.relative_to(data_dir)) for f in available_files]
 
     selected_filenames = st.sidebar.multiselect(
         "データソースを選択",
         options=available_filenames,
         default=available_filenames,
     )
-    selected_files_paths = [DATA_DIR / name for name in selected_filenames]
+    # 絶対パスに変換
+    selected_files_paths = [data_dir / name for name in selected_filenames]
 else:
-    st.sidebar.warning(f"`{DATA_DIR}` ディレクトリが見つかりません。")
+    st.sidebar.warning(f"`{input_dir}` ディレクトリが見つかりません。")
     selected_files_paths = []
 
 # データの読み込み

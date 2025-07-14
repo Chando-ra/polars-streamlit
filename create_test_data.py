@@ -49,6 +49,11 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
         for _ in range(num_rows):
             row = []
             for i in range(num_cols):
+                # 5%の確率で欠損値を生成
+                if random.random() < 0.05:
+                    row.append("")
+                    continue
+
                 if i == 0:  # SCORE
                     row.append(random.randint(-1000, 2000))
                 elif i == 1:  # string_col_0

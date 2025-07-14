@@ -44,8 +44,26 @@ class DataLoader:
 
     def preprocess(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """
-        SCOREに基づいてカテゴリ分類し、日付情報を追加する前処理を適用する。
+        欠損値処理、カテゴリ分類、日付情報の追加などの前処理を適用する。
         """
+        # 1. 全列が欠損値の行を削除
+        lf = lf.filter(~pl.all_horizontal(pl.all().is_null()))
+
+        # 2. 欠損値処理
+        lf = lf.with_columns(
+            # SCORE, EVENT_VALUE: 0で補完
+            pl.col("SCORE").fill_null(0),
+            pl.col("EVENT_VALUE").fill_null(0),
+            # 文字列型(pl.Utf8)の列を"unknown"で補完
+            pl.col(pl.Utf8).fill_null("unknown"),
+            # is_fraud: Falseで補完
+            pl.col("is_fraud").fill_null(False),
+            # EVENT_TIME: 前後の値で補完
+            pl.col("EVENT_TIME").forward_fill(),
+        )
+        # numeric_col_* は null のまま
+
+        # 3. 元の前処理
         t1, t2 = self.score_thresholds
         return lf.with_columns(
             pl.when(pl.col("SCORE") < t1)
@@ -77,6 +95,7 @@ class DataLoader:
                 separator="\t",
                 try_parse_dates=True,
                 has_header=True,
+                quote_char=None,
                 ignore_errors=True,
             )
             processed_lf = self.preprocess(lf)

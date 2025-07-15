@@ -157,10 +157,22 @@ if len(lf.columns) > 0:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("レコード数 トップ100")
-                st.dataframe(top_by_count)
+                st.data_editor(
+                    top_by_count,
+                    column_config={
+                        "レコード数": st.column_config.NumberColumn(format="localized")
+                    },
+                    use_container_width=True,
+                )
             with col2:
                 st.subheader("EVENT_VALUE合計 トップ100")
-                st.dataframe(top_by_value)
+                st.data_editor(
+                    top_by_value,
+                    column_config={
+                        "EVENT_VALUE合計": st.column_config.NumberColumn(format="yen")
+                    },
+                    use_container_width=True,
+                )
 
             st.header(f"{time_agg_label}トレンド分析")
 
@@ -241,7 +253,7 @@ if len(lf.columns) > 0:
                 category_orders={"category_group": top_n_by_value_cats + ["Other"]},
             )
             fig2.update_traces(
-                hovertemplate="<b>%{x}</b><br>カテゴリ: %{fullData.name}<br>価値合計: %{y:,.0f}<extra></extra>"
+                hovertemplate="<b>%{x}</b><br>カテゴリ: %{fullData.name}<br>価値合計: ¥%{y:,.0f}<extra></extra>"
             )
             st.plotly_chart(fig2, use_container_width=True)
 

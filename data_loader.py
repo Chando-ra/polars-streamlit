@@ -109,19 +109,58 @@ class DataLoader:
 
     def process_tar_gz(self, file_path: Path):
         """
-        tar.gzファイルを展開し、内部のファイルを処理する。
-        展開先のディレクトリはtar.gzファイル名から生成する。
+        tar.gzファイルを展開し、内部のTSVファイルを一つにまとめてParquetとして保存する。
         """
-        typer.echo(f"展開中: {file_path}")
-        # hoge.tar.gz -> hoge
-        tar_output_dir = self.output_dir / file_path.name.removesuffix(".tar.gz")
+        output_path = (
+            self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}.parquet"
+        )
+        if output_path.exists():
+            typer.echo(f"スキップ: {output_path} は既に存在します。")
+            return
 
-        with tarfile.open(file_path, "r:gz") as tar:
-            tar.extractall(path=self.temp_dir)
-            for member in tar.getmembers():
-                if member.isfile() and (member.name.endswith((".tsv", ".txt"))):
-                    extracted_path = self.temp_dir / member.name
-                    self.process_file(extracted_path, output_dir=tar_output_dir)
+        typer.echo(f"処理中（アーカイブ）: {file_path}")
+
+        try:
+            with tarfile.open(file_path, "r:gz") as tar:
+                # アーカイブ内のTSVファイルパスをすべて取得
+                tsv_files = [
+                    member
+                    for member in tar.getmembers()
+                    if member.isfile() and member.name.endswith((".tsv", ".txt"))
+                ]
+                if not tsv_files:
+                    typer.echo(
+                        f"警告: {file_path} 内に処理対象のファイルが見つかりません。"
+                    )
+                    return
+
+                # ファイルを展開せずに直接読み込む
+                lf_list = []
+                for member in tsv_files:
+                    # tar.extractfileはBytesIOのようなオブジェクトを返す
+                    file_obj = tar.extractfile(member)
+                    if file_obj:
+                        lf = pl.scan_csv(
+                            file_obj,
+                            separator="\t",
+                            try_parse_dates=True,
+                            has_header=True,
+                            quote_char=None,
+                            ignore_errors=True,
+                        )
+                        lf_list.append(lf)
+
+                # LazyFrameを結合
+                combined_lf = pl.concat(lf_list)
+                processed_lf = self.preprocess(combined_lf)
+                processed_lf.sink_parquet(output_path)
+                typer.echo(f"保存完了: {output_path}")
+
+        except Exception as e:
+            typer.secho(
+                f"エラー: {file_path} の処理中にエラーが発生しました: {e}",
+                fg=typer.colors.RED,
+            )
 
     def run(self):
         """

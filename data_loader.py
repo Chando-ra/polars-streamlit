@@ -18,11 +18,13 @@ class DataLoader:
         input_dir: Path,
         output_dir: Path,
         score_thresholds: List[int],
+        partitioned: bool,
         temp_dir: Path = Path("temp_extracted_data"),
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.score_thresholds = sorted(score_thresholds)
+        self.partitioned = partitioned
         self.temp_dir = temp_dir
 
         self.output_dir.mkdir(exist_ok=True)
@@ -78,15 +80,11 @@ class DataLoader:
     def process_file(self, file_path: Path, output_dir: Path | None = None):
         """
         単一のデータファイルを処理し、Parquetとして保存する。
+        パーティション分割が有効な場合は、サブディレクトリに分割して保存する。
         """
         if output_dir is None:
             output_dir = self.output_dir
         output_dir.mkdir(exist_ok=True)
-
-        output_path = output_dir / f"{file_path.stem}.parquet"
-        if output_path.exists():
-            typer.echo(f"スキップ: {output_path} は既に存在します。")
-            return
 
         typer.echo(f"処理中: {file_path}")
         try:
@@ -99,8 +97,29 @@ class DataLoader:
                 ignore_errors=True,
             )
             processed_lf = self.preprocess(lf)
-            processed_lf.sink_parquet(output_path)
-            typer.echo(f"保存完了: {output_path}")
+
+            if self.partitioned:
+                output_partition_dir = output_dir / file_path.stem
+                if output_partition_dir.exists():
+                    typer.echo(f"スキップ: {output_partition_dir} は既に存在します。")
+                    return
+                typer.echo(f"パーティション分割して保存: {output_partition_dir}")
+                df = processed_lf.collect()
+                df.write_parquet(
+                    output_partition_dir,
+                    partition_by=["event_month", "score_level"],
+                    use_pyarrow=True,
+                )
+                typer.echo(f"保存完了: {output_partition_dir}")
+            else:
+                output_path = output_dir / f"{file_path.stem}.parquet"
+                if output_path.exists():
+                    typer.echo(f"スキップ: {output_path} は既に存在します。")
+                    return
+                typer.echo(f"単一ファイルとして保存: {output_path}")
+                processed_lf.sink_parquet(output_path)
+                typer.echo(f"保存完了: {output_path}")
+
         except Exception as e:
             typer.secho(
                 f"エラー: {file_path} の処理中にエラーが発生しました: {e}",
@@ -110,19 +129,12 @@ class DataLoader:
     def process_tar_gz(self, file_path: Path):
         """
         tar.gzファイルを展開し、内部のTSVファイルを一つにまとめてParquetとして保存する。
+        パーティション分割が有効な場合は、サブディレクトリに分割して保存する。
         """
-        output_path = (
-            self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}.parquet"
-        )
-        if output_path.exists():
-            typer.echo(f"スキップ: {output_path} は既に存在します。")
-            return
-
         typer.echo(f"処理中（アーカイブ）: {file_path}")
 
         try:
             with tarfile.open(file_path, "r:gz") as tar:
-                # アーカイブ内のTSVファイルパスをすべて取得
                 tsv_files = [
                     member
                     for member in tar.getmembers()
@@ -134,10 +146,8 @@ class DataLoader:
                     )
                     return
 
-                # ファイルを展開せずに直接読み込む
                 lf_list = []
                 for member in tsv_files:
-                    # tar.extractfileはBytesIOのようなオブジェクトを返す
                     file_obj = tar.extractfile(member)
                     if file_obj:
                         lf = pl.scan_csv(
@@ -150,11 +160,43 @@ class DataLoader:
                         )
                         lf_list.append(lf)
 
-                # LazyFrameを結合
+                if not lf_list:
+                    typer.echo(
+                        f"警告: {file_path} 内に有効なデータがありませんでした。"
+                    )
+                    return
+
                 combined_lf = pl.concat(lf_list)
                 processed_lf = self.preprocess(combined_lf)
-                processed_lf.sink_parquet(output_path)
-                typer.echo(f"保存完了: {output_path}")
+
+                if self.partitioned:
+                    output_partition_dir = (
+                        self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}"
+                    )
+                    if output_partition_dir.exists():
+                        typer.echo(
+                            f"スキップ: {output_partition_dir} は既に存在します。"
+                        )
+                        return
+                    typer.echo(f"パーティション分割して保存: {output_partition_dir}")
+                    df = processed_lf.collect()
+                    df.write_parquet(
+                        output_partition_dir,
+                        partition_by=["event_month", "score_level"],
+                        use_pyarrow=True,
+                    )
+                    typer.echo(f"保存完了: {output_partition_dir}")
+                else:
+                    output_path = (
+                        self.output_dir
+                        / f"{file_path.name.removesuffix('.tar.gz')}.parquet"
+                    )
+                    if output_path.exists():
+                        typer.echo(f"スキップ: {output_path} は既に存在します。")
+                        return
+                    typer.echo(f"単一ファイルとして保存: {output_path}")
+                    processed_lf.sink_parquet(output_path)
+                    typer.echo(f"保存完了: {output_path}")
 
         except Exception as e:
             typer.secho(
@@ -204,6 +246,12 @@ def main(
     ),
     score_t1: int = typer.Option(500, help="SCOREの閾値1（low <-> mid）"),
     score_t2: int = typer.Option(1500, help="SCOREの閾値2（mid <-> high）"),
+    partitioned: bool = typer.Option(
+        False,
+        "--partitioned",
+        "-p",
+        help="データをパーティション分割して保存するかどうか。デフォルトは単一ファイル。",
+    ),
 ):
     """
     データローダーを実行し、ファイルを前処理してParquet形式で保存します。
@@ -212,6 +260,7 @@ def main(
         input_dir=input_dir,
         output_dir=output_dir,
         score_thresholds=[score_t1, score_t2],
+        partitioned=partitioned,
     )
     loader.run()
 

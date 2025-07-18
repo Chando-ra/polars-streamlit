@@ -27,6 +27,7 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
     数値、日付、カテゴリ、真偽値など、多様なデータ型を含むテスト用のTSVファイルを生成する。
     """
     categories = [generate_random_string() for _ in range(num_categories)]
+    rule_list = [f"ルール{i}" for i in range(1, 201)]
 
     # 日付生成用の期間設定
     end_date = datetime.datetime.now()
@@ -43,6 +44,7 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
                 header.append(f"string_col_{i // 2}")
             else:
                 header.append(f"numeric_col_{i // 2}")
+        header.append("hit_rule")
         writer.writerow(header)
 
         # データ行を生成
@@ -70,12 +72,17 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
                     row.append(generate_random_string())
                 else:  # numeric
                     row.append(random.randint(0, 1_000_000))
+
+            # hit_ruleカラムの生成
+            num_rules = random.randint(0, 5)  # 0から5個のルールをランダムに選択
+            selected_rules = random.sample(rule_list, num_rules)
+            row.append(" ".join(selected_rules))
             writer.writerow(row)
 
 
 if __name__ == "__main__":
-    file_path = "test_data.tsv"
-    num_rows = 10_000_000
+    file_path = "input_data/test_data.tsv"
+    num_rows = 1_000_000  # 少し小さくして実行時間を短縮
     num_cols = 10
     print(f"Generating {num_rows} rows of test data in '{file_path}'...")
     create_test_data(file_path, num_rows, num_cols)

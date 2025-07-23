@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Generator, List
 
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 import typer
 
 
@@ -169,40 +171,105 @@ class DataLoader:
                 combined_lf = pl.concat(lf_list)
                 processed_lf = self.preprocess(combined_lf)
 
-                if self.partitioned:
-                    output_partition_dir = (
-                        self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}"
-                    )
-                    if output_partition_dir.exists():
-                        typer.echo(
-                            f"スキップ: {output_partition_dir} は既に存在します。"
-                        )
-                        return
-                    typer.echo(f"パーティション分割して保存: {output_partition_dir}")
-                    df = processed_lf.collect()
-                    df.write_parquet(
-                        output_partition_dir,
-                        partition_by=["event_month", "score_level"],
-                        use_pyarrow=True,
-                    )
-                    typer.echo(f"保存完了: {output_partition_dir}")
-                else:
-                    output_path = (
-                        self.output_dir
-                        / f"{file_path.name.removesuffix('.tar.gz')}.parquet"
-                    )
-                    if output_path.exists():
-                        typer.echo(f"スキップ: {output_path} は既に存在します。")
-                        return
-                    typer.echo(f"単一ファイルとして保存: {output_path}")
-                    processed_lf.sink_parquet(output_path)
-                    typer.echo(f"保存完了: {output_path}")
+                # このメソッドはパーティション分割専用とする
+                output_partition_dir = (
+                    self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}"
+                )
+                if output_partition_dir.exists():
+                    typer.echo(f"スキップ: {output_partition_dir} は既に存在します。")
+                    return
+                typer.echo(f"パーティション分割して保存: {output_partition_dir}")
+                df = processed_lf.collect()
+                df.write_parquet(
+                    output_partition_dir,
+                    partition_by=["event_month", "score_level"],
+                    use_pyarrow=True,
+                )
+                typer.echo(f"保存完了: {output_partition_dir}")
 
         except Exception as e:
             typer.secho(
                 f"エラー: {file_path} の処理中にエラーが発生しました: {e}",
                 fg=typer.colors.RED,
             )
+
+    def process_tar_gz_in_chunks(self, file_path: Path):
+        """
+        tar.gzファイルをチャンク処理し、内部のTSVファイルを単一のParquetに追記保存する。
+        """
+        typer.echo(f"処理中（チャンク処理）: {file_path}")
+        output_path = (
+            self.output_dir / f"{file_path.name.removesuffix('.tar.gz')}.parquet"
+        )
+        if output_path.exists():
+            typer.echo(f"スキップ: {output_path} は既に存在します。")
+            return
+
+        writer = None
+        try:
+            with tarfile.open(file_path, "r:gz") as tar:
+                tsv_files = [
+                    member
+                    for member in tar.getmembers()
+                    if member.isfile() and member.name.endswith((".tsv", ".txt"))
+                ]
+                if not tsv_files:
+                    typer.echo(
+                        f"警告: {file_path} 内に処理対象のファイルが見つかりません。"
+                    )
+                    return
+
+                for member in tsv_files:
+                    # ExFileObjectを一時ファイルとして保存
+                    temp_file_path = self.temp_dir / Path(member.name).name
+                    with (
+                        tar.extractfile(member) as src,
+                        open(temp_file_path, "wb") as dest,
+                    ):
+                        dest.write(src.read())
+
+                    # 一時ファイルからストリーミング処理
+                    try:
+                        reader = pl.read_csv_batched(
+                            temp_file_path,
+                            separator="\t",
+                            try_parse_dates=True,
+                            has_header=True,
+                            quote_char=None,
+                            ignore_errors=True,
+                            batch_size=500_000,  # メモリに応じて調整
+                        )
+                        while True:
+                            batches = reader.next_batches(1)
+                            if not batches:
+                                break
+                            batch = batches[0]
+                            # polarsのDataFrameに変換し、前処理を適用
+                            processed_df = self.preprocess(batch.lazy()).collect()
+
+                            # Arrowテーブルに変換
+                            arrow_table = processed_df.to_arrow()
+
+                            if writer is None:
+                                # 最初のバッチでスキーマを決定し、Writerを初期化
+                                writer = pq.ParquetWriter(
+                                    output_path, arrow_table.schema
+                                )
+
+                            writer.write_table(arrow_table)
+                    finally:
+                        # 一時ファイルを削除
+                        os.remove(temp_file_path)
+
+        except Exception as e:
+            typer.secho(
+                f"エラー: {file_path} の処理中にエラーが発生しました: {e}",
+                fg=typer.colors.RED,
+            )
+        finally:
+            if writer:
+                writer.close()
+                typer.echo(f"保存完了: {output_path}")
 
     def run(self):
         """
@@ -214,7 +281,12 @@ class DataLoader:
                 if file_path.suffix in [".tsv", ".txt"]:
                     self.process_file(file_path)
                 elif file_path.suffix == ".gz" and file_path.name.endswith(".tar.gz"):
-                    self.process_tar_gz(file_path)
+                    if self.partitioned:
+                        # 従来のパーティション分割処理
+                        self.process_tar_gz(file_path)
+                    else:
+                        # チャンク処理で単一ファイルに保存
+                        self.process_tar_gz_in_chunks(file_path)
         finally:
             # 一時ディレクトリのクリーンアップ
             shutil.rmtree(self.temp_dir)

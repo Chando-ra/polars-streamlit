@@ -11,3 +11,10 @@ wheels/
 
 # Data files
 test_data*
+
+# Generated data and results
+/prepared_data/
+/analysis_results/
+/output/
+/hdf_data/
+/pertition/

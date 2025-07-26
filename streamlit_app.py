@@ -106,27 +106,42 @@ if len(lf.columns) > 0:
 
     # --- フィルタ設定 ---
     st.sidebar.header("フィルタ設定")
-    # .collect() を使って実際の値を取得
+
+    # is_fraud フラグのフィルタ
     fraud_options = (
         lf.select("is_fraud").unique().collect().get_column("is_fraud").sort().to_list()
     )
     selected_fraud = st.sidebar.multiselect(
         "不正フラグ (is_fraud)", options=fraud_options, default=fraud_options
     )
-    level_options = (
-        lf.select("score_level")
-        .unique()
-        .collect()
-        .get_column("score_level")
-        .sort()
-        .to_list()
+
+    # スコア閾値の入力
+    st.sidebar.subheader("スコアレベル設定")
+    threshold_low = st.sidebar.number_input("低リスクの上限スコア", value=1000, step=1)
+    threshold_mid = st.sidebar.number_input("中リスクの上限スコア", value=1500, step=1)
+
+    if threshold_low >= threshold_mid:
+        st.sidebar.error("低リスクの閾値は中リスクの閾値より小さくしてください。")
+        st.stop()
+
+    # 動的にscore_levelを生成
+    lf_with_score_level = lf.with_columns(
+        pl.when(pl.col("SCORE") <= threshold_low)
+        .then(pl.lit("Low"))
+        .when(pl.col("SCORE") <= threshold_mid)
+        .then(pl.lit("Mid"))
+        .otherwise(pl.lit("High"))
+        .alias("score_level")
     )
+
+    # score_levelのフィルタ
+    level_options = ["Low", "Mid", "High"]
     selected_levels = st.sidebar.multiselect(
-        "スコアレベル (score_level)", options=level_options, default=level_options
+        "スコアレベル (動的)", options=level_options, default=level_options
     )
 
     # --- データのフィルタリング ---
-    filtered_lf = lf.filter(
+    filtered_lf = lf_with_score_level.filter(
         (pl.col("is_fraud").is_in(selected_fraud))
         & (pl.col("score_level").is_in(selected_levels))
     )

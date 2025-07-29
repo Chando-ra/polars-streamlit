@@ -336,6 +336,158 @@ if data_loaded:
             )
             st.plotly_chart(fig2, use_container_width=True)
 
+            # --- 曜日・時間帯別 ヒートマップ ---
+            st.header("曜日・時間帯別 アクティビティヒートマップ")
+
+            # 曜日と時間を抽出して件数をカウントするクエリ
+            heatmap_query = """
+                SELECT
+                    EXTRACT(isodow FROM EVENT_TIME) AS day_of_week, -- 月曜:1, 日曜:7
+                    EXTRACT(hour FROM EVENT_TIME) AS hour_of_day,
+                    COUNT(*) AS record_count
+                FROM filtered_data
+                GROUP BY day_of_week, hour_of_day
+            """
+            try:
+                heatmap_df = con.execute(heatmap_query).fetchdf()
+
+                if not heatmap_df.empty:
+                    # 曜日名のマッピング
+                    day_map = {
+                        1: "月",
+                        2: "火",
+                        3: "水",
+                        4: "木",
+                        5: "金",
+                        6: "土",
+                        7: "日",
+                    }
+                    heatmap_df["day_of_week_str"] = heatmap_df["day_of_week"].map(
+                        day_map
+                    )
+
+                    # ヒートマップの作成
+                    fig_heatmap = px.density_heatmap(
+                        heatmap_df,
+                        x="hour_of_day",
+                        y="day_of_week_str",
+                        z="record_count",
+                        nbinsx=24,
+                        nbinsy=7,
+                        title="アクティビティの発生時間帯",
+                        labels={
+                            "hour_of_day": "時間帯",
+                            "day_of_week_str": "曜日",
+                            "z": "件数",
+                        },
+                        category_orders={
+                            "day_of_week_str": [
+                                "月",
+                                "火",
+                                "水",
+                                "木",
+                                "金",
+                                "土",
+                                "日",
+                            ]
+                        },
+                        color_continuous_scale="Blues",
+                    )
+                    fig_heatmap.update_layout(
+                        xaxis_title="時間帯 (0-23時)",
+                        yaxis_title="曜日",
+                        xaxis=dict(tickmode="linear", dtick=2),
+                    )
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                else:
+                    st.warning("ヒートマップ表示用のデータがありません。")
+
+            except Exception as e:
+                st.error(f"ヒートマップの生成中にエラーが発生しました: {e}")
+
+            # --- 取引金額の分布 ---
+            st.header("取引金額の分布")
+            try:
+                dist_query = "SELECT EVENT_VALUE, is_fraud FROM filtered_data"
+                dist_df = con.execute(dist_query).fetchdf()
+
+                if not dist_df.empty:
+                    fig_dist = px.histogram(
+                        dist_df,
+                        x="EVENT_VALUE",
+                        color="is_fraud",
+                        marginal="box",  # or "rug", "violin"
+                        barmode="overlay",
+                        title="取引金額の分布（不正利用別）",
+                        labels={
+                            "EVENT_VALUE": "取引金額 (EVENT_VALUE)",
+                            "is_fraud": "不正利用フラグ",
+                        },
+                        color_discrete_map={True: "red", False: "royalblue"},
+                        opacity=0.7,
+                    )
+                    fig_dist.update_layout(
+                        xaxis_title="取引金額",
+                        yaxis_title="件数",
+                        legend_title_text="不正利用",
+                    )
+                    st.plotly_chart(fig_dist, use_container_width=True)
+                else:
+                    st.warning("取引金額分布の表示用データがありません。")
+            except Exception as e:
+                st.error(f"取引金額分布の生成中にエラーが発生しました: {e}")
+
+            # --- 不正利用率の散布図 ---
+            st.header("カテゴリ別 不正利用率")
+            try:
+                # 上位N件のカテゴリに絞る
+                top_n_cats = top_by_count.head(top_n)[agg_col].to_list()
+
+                if top_n_cats:
+                    # カテゴリリストをSQLのIN句で使えるようにフォーマット
+                    cats_in_clause = ", ".join([f"'{cat}'" for cat in top_n_cats])
+
+                    fraud_rate_query = f"""
+                        SELECT
+                            {agg_col},
+                            COUNT(*) AS total_count,
+                            COUNT(*) FILTER (WHERE is_fraud = true) AS fraud_count,
+                            (CAST(fraud_count AS DOUBLE) / total_count) AS fraud_rate
+                        FROM filtered_data
+                        WHERE {agg_col} IN ({cats_in_clause})
+                        GROUP BY {agg_col}
+                    """
+                    fraud_rate_df = con.execute(fraud_rate_query).fetchdf()
+
+                    if not fraud_rate_df.empty:
+                        fig_scatter = px.scatter(
+                            fraud_rate_df,
+                            x="total_count",
+                            y="fraud_rate",
+                            size="total_count",
+                            color=agg_col,
+                            hover_name=agg_col,
+                            title=f"`{agg_col}`別 取引件数 vs 不正利用率 (上位{top_n})",
+                            labels={
+                                "total_count": "取引件数",
+                                "fraud_rate": "不正利用率",
+                                "color": "カテゴリ",
+                            },
+                            size_max=60,
+                        )
+                        fig_scatter.update_layout(
+                            xaxis_title="総取引件数",
+                            yaxis_title="不正利用率",
+                            yaxis=dict(tickformat=".2%"),  # Y軸をパーセント表示に
+                        )
+                        st.plotly_chart(fig_scatter, use_container_width=True)
+                    else:
+                        st.warning("散布図の表示用データがありません。")
+                else:
+                    st.warning("分析対象のカテゴリがありません。")
+            except Exception as e:
+                st.error(f"不正利用率散布図の生成中にエラーが発生しました: {e}")
+
     else:
         st.info("サイドバーで集計する列を選択してください。")
 else:

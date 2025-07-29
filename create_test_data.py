@@ -49,6 +49,9 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
 
         # データ行を生成
         for _ in range(num_rows):
+            # is_fraudを先に決定
+            is_fraud = random.random() < 0.01
+
             row = []
             for i in range(num_cols):
                 # 5%の確率で欠損値を生成
@@ -57,14 +60,19 @@ def create_test_data(file_path, num_rows, num_cols, num_categories=1000):
                     continue
 
                 if i == 0:  # SCORE
-                    row.append(random.randint(-1000, 2000))
+                    # is_fraudの値に基づいてスコアの分布を明確に分離
+                    if is_fraud:
+                        # 不正なデータはスコアが高い (1500-2500)
+                        row.append(random.randint(1500, 2500))
+                    else:
+                        # 正常なデータはスコアが低い (-1000 - 1499)
+                        row.append(random.randint(-1000, 1499))
                 elif i == 1:  # string_col_0
                     row.append(random.choice(categories))
                 elif i == 2:  # EVENT_VALUE
                     row.append(random.randint(0, 1_000_000))
                 elif i == 3:  # is_fraud
-                    # 約1%の確率でTrueを生成
-                    row.append(random.random() < 0.01)
+                    row.append(is_fraud)
                 elif i == 4:  # EVENT_TIME
                     row.append(generate_random_timestamp(start_date, end_date))
                 # --- 残りの列 ---

@@ -42,13 +42,19 @@ class DataLoader:
     def find_files(self) -> Generator[Path, None, None]:
         """
         入力ディレクトリから対象ファイル（.tsv, .txt, .tar.gz）を再帰的に探索する。
+        .venvなどの不要なディレクトリは除外する。
         """
         if not self.input_dir.exists():
             raise FileNotFoundError(
                 f"入力ディレクトリが見つかりません: {self.input_dir}"
             )
 
-        for root, _, files in os.walk(self.input_dir):
+        exclude_dirs = {".venv", "__pycache__", ".git", "tests"}
+
+        for root, dirs, files in os.walk(self.input_dir):
+            # 除外リストに含まれるディレクトリを探索対象から削除
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
             for file in files:
                 if file.endswith((".tsv", ".txt", ".tar.gz")):
                     yield Path(root) / file

@@ -4,6 +4,7 @@ import tarfile
 from pathlib import Path
 from typing import Generator, List
 
+import duckdb
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -21,16 +22,22 @@ class DataLoader:
         output_dir: Path,
         score_thresholds: List[int],
         partitioned: bool,
+        to_duckdb: bool,
+        duckdb_path: Path,
         temp_dir: Path = Path("temp_extracted_data"),
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.score_thresholds = sorted(score_thresholds)
         self.partitioned = partitioned
+        self.to_duckdb = to_duckdb
+        self.duckdb_path = duckdb_path
         self.temp_dir = temp_dir
 
         self.output_dir.mkdir(exist_ok=True)
         self.temp_dir.mkdir(exist_ok=True)
+        if self.to_duckdb:
+            self.duckdb_path.parent.mkdir(exist_ok=True)
 
     def find_files(self) -> Generator[Path, None, None]:
         """
@@ -271,6 +278,72 @@ class DataLoader:
                 writer.close()
                 typer.echo(f"保存完了: {output_path}")
 
+    def process_tar_gz_to_duckdb(self, file_path: Path):
+        """
+        tar.gzファイルを展開し、内部のTSVファイルをDuckDBのテーブルに保存する。
+        """
+        typer.echo(f"DuckDBへ保存中: {file_path}")
+        table_name = file_path.name.removesuffix(".tar.gz").replace("-", "_")
+
+        try:
+            with duckdb.connect(str(self.duckdb_path)) as con:
+                with tarfile.open(file_path, "r:gz") as tar:
+                    tsv_files = [
+                        member
+                        for member in tar.getmembers()
+                        if member.isfile() and member.name.endswith((".tsv", ".txt"))
+                    ]
+                    if not tsv_files:
+                        typer.echo(
+                            f"警告: {file_path} 内に処理対象のファイルが見つかりません。"
+                        )
+                        return
+
+                    # 最初のファイルでテーブルを作成
+                    first_member = tsv_files[0]
+                    with tar.extractfile(first_member) as file_obj:
+                        if file_obj:
+                            lf = pl.scan_csv(
+                                file_obj,
+                                separator="\t",
+                                try_parse_dates=True,
+                                has_header=True,
+                                quote_char=None,
+                                ignore_errors=True,
+                            )
+                            processed_df = self.preprocess(lf).collect()
+                            # テーブルが存在しない場合のみ作成
+                            con.execute(
+                                f"CREATE TABLE IF NOT EXISTS {table_name} AS SELECT * FROM processed_df"
+                            )
+                            typer.echo(
+                                f"テーブル '{table_name}' を作成し、最初のデータを挿入しました。"
+                            )
+
+                    # 残りのファイルを追記
+                    for member in tsv_files[1:]:
+                        with tar.extractfile(member) as file_obj:
+                            if file_obj:
+                                lf = pl.scan_csv(
+                                    file_obj,
+                                    separator="\t",
+                                    try_parse_dates=True,
+                                    has_header=True,
+                                    quote_char=None,
+                                    ignore_errors=True,
+                                )
+                                processed_df = self.preprocess(lf).collect()
+                                con.execute(
+                                    f"INSERT INTO {table_name} SELECT * FROM processed_df"
+                                )
+                typer.echo(f"テーブル '{table_name}' へのデータ追加が完了しました。")
+
+        except Exception as e:
+            typer.secho(
+                f"エラー: {file_path} のDuckDBへの保存中にエラーが発生しました: {e}",
+                fg=typer.colors.RED,
+            )
+
     def run(self):
         """
         データ処理パイプラインを実行する。
@@ -278,17 +351,21 @@ class DataLoader:
         typer.echo("データ処理を開始します...")
         try:
             for file_path in self.find_files():
-                if file_path.suffix in [".tsv", ".txt"]:
+                if self.to_duckdb:
+                    if file_path.suffix == ".gz" and file_path.name.endswith(".tar.gz"):
+                        self.process_tar_gz_to_duckdb(file_path)
+                    else:
+                        typer.echo(
+                            f"スキップ（DuckDBモード）: {file_path} は.tar.gz形式ではありません。"
+                        )
+                elif file_path.suffix in [".tsv", ".txt"]:
                     self.process_file(file_path)
                 elif file_path.suffix == ".gz" and file_path.name.endswith(".tar.gz"):
                     if self.partitioned:
-                        # 従来のパーティション分割処理
                         self.process_tar_gz(file_path)
                     else:
-                        # チャンク処理で単一ファイルに保存
                         self.process_tar_gz_in_chunks(file_path)
         finally:
-            # 一時ディレクトリのクリーンアップ
             shutil.rmtree(self.temp_dir)
             typer.echo("一時ファイルをクリーンアップしました。")
 
@@ -324,15 +401,27 @@ def main(
         "-p",
         help="データをパーティション分割して保存するかどうか。デフォルトは単一ファイル。",
     ),
+    to_duckdb: bool = typer.Option(
+        False,
+        "--to-duckdb",
+        help="データをDuckDBに保存するかどうか。",
+    ),
+    duckdb_path: Path = typer.Option(
+        "output/data.duckdb",
+        "--duckdb-path",
+        help="DuckDBデータベースファイルのパス。",
+    ),
 ):
     """
-    データローダーを実行し、ファイルを前処理してParquet形式で保存します。
+    データローダーを実行し、ファイルを前処理してParquetまたはDuckDB形式で保存します。
     """
     loader = DataLoader(
         input_dir=input_dir,
         output_dir=output_dir,
         score_thresholds=[score_t1, score_t2],
         partitioned=partitioned,
+        to_duckdb=to_duckdb,
+        duckdb_path=duckdb_path,
     )
     loader.run()
 
